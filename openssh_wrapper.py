@@ -115,7 +115,40 @@ class SSHConnection(object):
             raise SSHError(err.strip())
         return SSHResult(command, out.strip(), err.strip(), returncode)
 
-    def scp(self, files, target, mode=None, owner=None, fromLocal = True):
+    def download(self, files, target):
+        """ Copy files identified by their names to local location
+
+        :params files: iterable with file names,
+        
+        :param target: target file or directory to copy data to. Target file
+                       makes sense only if the number of files to copy equals
+                       to one.
+        """
+        scp_command = self.scp_command_up(files
+                                          , target)
+
+        print "SCP command:", scp_command
+        pipe = subprocess.Popen(scp_command,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=self.get_env())
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(self.timeout)
+        err = ""
+        try:
+            _, err = pipe.communicate()
+        except IOError, exc:
+            # pipe.terminate() # only in python 2.6 allowed
+            os.kill(pipe.pid, signal.SIGTERM)
+            signal.alarm(0) # disable alarm
+            raise SSHError(stderr=str(exc))
+        signal.alarm(0) # disable alarm
+        returncode = pipe.returncode
+        if returncode != 0: # ssh client error
+            raise SSHError(err.strip())
+
+
+    
+    def upload(self, files, target, mode=None, owner=None):
         """ Copy files identified by their names to remote location
 
         :param files: files or file-like objects to copy
@@ -135,7 +168,7 @@ class SSHConnection(object):
             if tmpdir:
                 shutil.rmtree(tmpdir, ignore_errors=True)
 
-        scp_command = self.scp_command(filenames, target, fromLocal)
+        scp_command = self.scp_command(filenames, target)
         print "SCP command:", scp_command
         pipe = subprocess.Popen(scp_command,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -239,11 +272,43 @@ class SSHConnection(object):
         cmd.append(interpreter)
         return cmd
 
-    def scp_command(self, files, target, fromLocal = True):
+    def scp_command_up(self, files, target):
+        """Build command string to stransfer the files from remote machine to local"""
+        cmd = ['/usr/bin/scp', '-q', '-r']
+
+        if isinstance(files, basestring):
+            raise ValueError('"files" argument have to be iterable (list or tuple)')
+        if len(files) < 1:
+            raise ValueError('You should name at least one file to copy')
+
+
+        files = map(str, files)
+        pack_filename = lambda name: '%s@%s:%s' % (self.login, self.server, name) if self.login else '%s:%s' % (self.server, name)
+        remote_names = map(pack_filename, files)
+
+        if self.configfile:
+            cmd += [ '-F', self.configfile ]
+        if self.identity_file:
+            cmd += [ '-i', self.identity_file ]
+        if self.port:
+            cmd += [ '-P', self.port ]
+
+        cmd += remote_names
+        cmd += [target]
+
+        return cmd
+        
+    def scp_command(self, files, target):
         """ Build the command string to transfer the files 
         identifiend by the given filenames. 
         Include target(s) if specified. """
         cmd = ['/usr/bin/scp', '-q', '-r']
+
+        if isinstance(files, basestring):
+            raise ValueError('"files" argument have to be iterable (list or tuple)')
+        if len(files) < 1:
+            raise ValueError('You should name at least one file to copy')
+
         files = map(str, files)
         if self.login:
             remotename = '%s@%s' % (self.login, self.server)
@@ -256,19 +321,13 @@ class SSHConnection(object):
         if self.port:
             cmd += [ '-P', self.port ]
 
-        if isinstance(files, basestring):
-            raise ValueError('"files" argument have to be iterable (list or tuple)')
-        if len(files) < 1:
-            raise ValueError('You should name at least one file to copy')
 
-        if fromLocal:
-            cmd += files
-            cmd.append('%s:%s' % (remotename, target))
-        else:
-            cmd.append('%s:%s' % (remotename, target))
-            cmd += files
+        
+        cmd += files
+        cmd.append('%s:%s' % (remotename, target))
             
         return cmd
+    
 
     def get_env(self):
         """ Retrieve environment variables and replace SSH_AUTH_SOCK
